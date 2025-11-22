@@ -271,14 +271,14 @@ export class ContentExtractionService {
             
             // Collect all LinkedIn and GitHub URLs
             const linkedInUrls = deepCrawlData.teamMembers
-              .map(m => m.linkedin)
-              .filter((url): url is string => !!url);
+              .map((m: { name: string; role?: string; linkedin?: string }) => m.linkedin)
+              .filter((url: string | undefined): url is string => !!url);
             
             const gitHubProfileUrls = content.socialLinks
-              .filter(url => url.includes('github.com') && !url.includes('/repos/'));
+              .filter((url: string) => url.includes('github.com') && !url.includes('/repos/'));
             
             const gitHubRepoUrls = content.codeRepositories
-              .filter(url => url.includes('github.com'));
+              .filter((url: string) => url.includes('github.com'));
             
             // Verify all external sources with timeout
             const externalVerification = await Promise.race([
@@ -867,10 +867,9 @@ export class ContentExtractionService {
 
     try {
       return await puppeteer.launch({
-        headless: 'new', // Use new headless mode for better compatibility
+        headless: true,
         args,
-        timeout: 30000,
-        protocolTimeout: 180000 // Increase protocol timeout for slow connections
+        timeout: 30000
       });
     } catch (error) {
       console.error('Failed to launch browser:', error);
