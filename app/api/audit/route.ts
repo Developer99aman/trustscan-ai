@@ -95,20 +95,15 @@ interface AnalyzeResponse {
  * with proper error handling, rate limiting, caching, and performance monitoring
  */
 export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeResponse>> {
+  console.log('🚀 Audit request received at:', new Date().toISOString())
+  
   // Start performance monitoring
   const requestId = performanceMonitor.startRequest(request)
   
   try {
     // Apply rate limiting first
-    return await withRateLimit(RateLimiters.audit)(request, async (req: NextRequest) => {
-      // Check if we should queue the request during high load
-      const queueStats = globalRequestQueue.getStats()
-      if (queueStats.queueLength > 50) {
-        return globalRequestQueue.enqueue(req, auditHandler, 1) // High priority for audit requests
-      }
-      
-      return auditHandler(req)
-    })
+    console.log('⏱️  Checking rate limits...')
+    return await withRateLimit(RateLimiters.audit)(request, auditHandler)
   } finally {
     // End performance monitoring
     performanceMonitor.endRequest(requestId, 200)
@@ -120,16 +115,24 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeRe
  */
 async function auditHandler(request: NextRequest): Promise<NextResponse<AnalyzeResponse>> {
   const startTime = Date.now()
+  console.log('✅ Rate limit passed, starting audit handler at:', new Date().toISOString())
   let auditId: string | undefined
   
   try {
     // Parse and validate request body
     const body = await parseRequestBody(request)
-    const { url, options = {} } = body
+    let { url, options = {} } = body
+    
+    // Trim whitespace from URL
+    url = url?.trim() || ''
+    console.log('🔍 Auditing URL:', url)
 
     // Authenticate user
+    console.log('🔐 Authenticating user...')
+    const authStart = Date.now()
     const authenticatedUser = await authenticateRequest(request)
     const user = authenticatedUser || { id: 'anonymous', email: 'anonymous@trustscan.ai' }
+    console.log(`✅ Authentication complete in ${Date.now() - authStart}ms, user: ${user.id}`)
 
     // Validate URL format and accessibility
     const urlValidation = validateUrl(url)
@@ -205,15 +208,17 @@ async function auditHandler(request: NextRequest): Promise<NextResponse<AnalyzeR
       )
       console.log(`Content extraction completed: ${extractedContent.contentLength} characters`)
     } catch (extractionError) {
-      console.error('Content extraction failed:', extractionError)
-      // Log detailed error for debugging
-      if (extractionError instanceof Error) {
-        console.error('Extraction error details:', {
-          message: extractionError.message,
-          stack: extractionError.stack
-        })
+      console.error('Puppeteer extraction failed, trying Gemini web browsing fallback...')
+      
+      // FALLBACK: Use Gemini's web browsing capability
+      try {
+        extractedContent = await analysisService.extractContentWithGemini(url)
+        const totalLength = extractedContent.mainContent.length + extractedContent.teamInfo.length + extractedContent.tokenomics.length
+        console.log(`✅ Gemini extraction successful: ${totalLength} characters`)
+      } catch (geminiError) {
+        console.error('Both Puppeteer and Gemini extraction failed:', geminiError)
+        throw extractionError // Throw original error
       }
-      throw extractionError
     }
 
     // Step 2: Analyze content with AI (with caching and improved retry logic)
@@ -319,8 +324,8 @@ async function auditHandler(request: NextRequest): Promise<NextResponse<AnalyzeR
     const responseData = {
       success: true,
       auditId: auditReport.id,
-      report: detailedReport,
-      summary: summaryReport,
+      report: JSON.parse(JSON.stringify(detailedReport)),
+      summary: JSON.parse(JSON.stringify(summaryReport)),
       fullAuditData: {
         id: auditReport.id,
         url: auditReport.url,
@@ -487,7 +492,7 @@ function handleAuditError(error: unknown, auditId?: string): NextResponse<Analyz
         message.includes('enotfound')) {
       return NextResponse.json({
         ...baseResponse,
-        error: 'Website not found. Please check the URL and try again.'
+        error: 'Website not found or returned 404. The URL may be incorrect, the site may be down, or it may be blocking automated access. Please verify the URL in your browser first.'
       }, { status: 404 })
     }
 

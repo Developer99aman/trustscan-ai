@@ -237,7 +237,7 @@ export class ContentExtractionService {
         try {
           console.log('🔍 Starting deep crawl for additional DeFi information...');
           // Use timeout for deep crawl to prevent hanging
-          const deepCrawlTimeout = process.env.VERCEL === '1' ? 15000 : 20000;
+          const deepCrawlTimeout = process.env.VERCEL === '1' ? 8000 : 10000;
           const deepCrawlData = await Promise.race([
             this.performDeepCrawl(page, url, $),
             new Promise<any>((_, reject) => 
@@ -400,20 +400,26 @@ export class ContentExtractionService {
       const importantLinks = this.discoverImportantLinks($, baseUrl);
       console.log(`📋 Found ${importantLinks.length} important links to crawl`);
 
-      // Crawl each important page (limit to 10 to be more thorough)
-      const linksToCrawl = importantLinks.slice(0, 10);
+      // Crawl each important page (limit to 3 for faster processing)
+      const linksToCrawl = importantLinks.slice(0, 3);
       
       for (const link of linksToCrawl) {
         try {
           console.log(`  🔗 Crawling: ${link.url}`);
           
           // Use timeout to prevent hanging on unresponsive pages
-          const response = await Promise.race([
-            page.goto(link.url, { waitUntil: 'domcontentloaded', timeout: 10000 }),
-            new Promise<null>((_, reject) => 
-              setTimeout(() => reject(new Error('Deep crawl page timeout')), 12000)
-            )
-          ]);
+          let response;
+          try {
+            response = await Promise.race([
+              page.goto(link.url, { waitUntil: 'domcontentloaded', timeout: 5000 }),
+              new Promise<null>((_, reject) => 
+                setTimeout(() => reject(new Error('Deep crawl page timeout')), 6000)
+              )
+            ]);
+          } catch (gotoError) {
+            console.log(`  ❌ Failed to navigate: ${link.url}`);
+            continue;
+          }
           
           // Check if page exists (not 404)
           if (!response || response.status() === 404) {
@@ -837,6 +843,12 @@ export class ContentExtractionService {
       'Connection': 'keep-alive',
       'Upgrade-Insecure-Requests': '1',
     });
+    
+    // Hide automation indicators
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      (window as any).chrome = { runtime: {} };
+    });
 
     return page;
   }
@@ -852,16 +864,17 @@ export class ContentExtractionService {
       '--disable-gpu',
       '--disable-web-resources',
       '--disable-default-apps',
-      '--disable-preconnect'
+      '--disable-preconnect',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-features=VizDisplayCompositor'
     ];
 
     if (method === 'fallback') {
       // More stealth options for fallback
       args.push(
-        '--disable-blink-features=AutomationControlled',
-        '--disable-features=VizDisplayCompositor',
         '--disable-extensions',
-        '--disable-sync'
+        '--disable-sync',
+        '--window-size=1920,1080'
       );
     }
 
@@ -898,6 +911,13 @@ export class ContentExtractionService {
           throw ExtractionErrorHandler.createError(
             ExtractionErrorType.ACCESS_DENIED,
             `HTTP 403: Access forbidden`,
+            undefined,
+            url
+          );
+        } else if (response.status() === 404) {
+          throw ExtractionErrorHandler.createError(
+            ExtractionErrorType.ACCESS_DENIED,
+            `HTTP 404: Page not found`,
             undefined,
             url
           );
@@ -973,15 +993,18 @@ export class ContentExtractionService {
       try {
         await page.waitForFunction(
           () => document.body && document.body.innerText.length > 100,
-          { timeout: 10000 }
+          { timeout: 15000 }
         );
       } catch {
         // Continue if timeout
       }
+      
+      // Additional wait for JavaScript-heavy sites (Hedera projects often use React/Next.js)
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    } else {
+      // Fallback method - wait less time
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
-
-    // Additional wait for JavaScript-heavy sites
-    await new Promise(resolve => setTimeout(resolve, 2000));
   }
 
   private parseContent($: cheerio.CheerioAPI, url: string, method: 'primary' | 'fallback' | 'minimal'): ExtractedContent {

@@ -668,6 +668,70 @@ export class AIAnalysisService {
   }
 
   /**
+   * Extracts website content using Gemini's web browsing capability
+   * Used as fallback when Puppeteer fails
+   */
+  async extractContentWithGemini(url: string): Promise<ExtractedContent> {
+    console.log(`🤖 Using Gemini to extract content from: ${url}`);
+    
+    const prompt = `Visit this website and extract ALL available information: ${url}
+
+Extract and return in JSON format:
+{
+  "title": "website title",
+  "description": "meta description or main tagline",
+  "mainContent": "all main text content from the page",
+  "documentation": ["list of documentation sections found"],
+  "teamInfo": "any team/founder/about information",
+  "tokenomics": "any token/economics information",
+  "securityInfo": "any security/audit information",
+  "socialLinks": ["list of social media URLs"],
+  "codeRepositories": ["list of GitHub/GitLab URLs"]
+}
+
+IMPORTANT: Extract as much content as possible. If the website is a DeFi/blockchain project, focus on:
+- Team information and leadership
+- Tokenomics and token distribution
+- Security audits and bug bounties
+- Technical documentation
+- Community channels
+- GitHub repositories`;
+
+    try {
+      const result = await this.model.generateContent(prompt);
+      const response = await result.response;
+      const text = response.text();
+      
+      // Parse JSON response
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('No JSON found in Gemini response');
+      }
+      
+      const data = JSON.parse(jsonMatch[0]);
+      
+      return {
+        url,
+        title: data.title || 'No title',
+        description: data.description || '',
+        mainContent: data.mainContent || '',
+        documentation: Array.isArray(data.documentation) ? data.documentation : [],
+        teamInfo: data.teamInfo || '',
+        tokenomics: data.tokenomics || '',
+        securityInfo: data.securityInfo || '',
+        socialLinks: Array.isArray(data.socialLinks) ? data.socialLinks : [],
+        codeRepositories: Array.isArray(data.codeRepositories) ? data.codeRepositories : [],
+        extractedAt: new Date(),
+        contentLength: (data.mainContent || '').length + (data.teamInfo || '').length + (data.tokenomics || '').length,
+        extractionMethod: 'minimal'
+      } as ExtractedContent;
+    } catch (error) {
+      console.error('Gemini extraction failed:', error);
+      throw new Error(`Gemini web extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
    * Detects project type from content with strict DeFi validation
    * CRITICAL: Only returns 'defi' for authentic blockchain/DeFi projects
    */
@@ -1539,8 +1603,8 @@ Return your analysis in this EXACT JSON format (no additional text):
       .replace(/\}(?!.*\})[\s\S]*$/, '}')
       // Fix unescaped newlines in strings
       .replace(/"([^"]*?)\n([^"]*?)"/g, '"$1 $2"')
-      // Fix unescaped quotes in string values (but not property names)
-      .replace(/:\s*"([^"]*)'([^"]*)"/g, ': "$1\'$2"');
+      // Escape apostrophes in string values
+      .replace(/:\s*"([^"]*)'([^"]*)"/g, (match, before, after) => `: "${before}\\u0027${after}"`);
     
     // Additional pass to fix nested quote issues
     try {
@@ -1552,8 +1616,8 @@ Return your analysis in this EXACT JSON format (no additional text):
       cleaned = cleaned
         // Remove HTML entities
         .replace(/&quot;/g, '"')
-        .replace(/&apos;/g, "'")
-        .replace(/&#39;/g, "'")
+        .replace(/&apos;/g, "\\u0027")
+        .replace(/&#39;/g, "\\u0027")
         // Fix double commas
         .replace(/,,+/g, ',')
         // Fix spaces in property names
