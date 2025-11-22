@@ -181,27 +181,40 @@ async function auditHandler(request: NextRequest): Promise<NextResponse<AnalyzeR
 
     // Step 1: Extract website content with optimized timeout and caching
     console.log(`Starting content extraction for ${url}`)
-    const extractedContent = await withTimeout(
-      async () => {
-        const contentCacheKey = CacheKeyGenerator.contentExtraction(url)
-        const cachedContent = Caches.contentExtraction.get(contentCacheKey)
-        
-        if (cachedContent) {
-          console.log(`Cache hit for content extraction: ${url}`)
-          return cachedContent
-        }
-        
-        const content = await extractionService.extractWebsiteContent(url)
-        
-        // Cache content extraction results
-        Caches.contentExtraction.set(contentCacheKey, content, 15 * 60 * 1000) // 15 minutes
-        
-        return content
-      },
-      45000, // Reduced to 45 seconds for better UX
-      'Content extraction timed out'
-    )
-    console.log(`Content extraction completed: ${extractedContent.contentLength} characters`)
+    let extractedContent
+    try {
+      extractedContent = await withTimeout(
+        async () => {
+          const contentCacheKey = CacheKeyGenerator.contentExtraction(url)
+          const cachedContent = Caches.contentExtraction.get(contentCacheKey)
+          
+          if (cachedContent) {
+            console.log(`Cache hit for content extraction: ${url}`)
+            return cachedContent
+          }
+          
+          const content = await extractionService.extractWebsiteContent(url)
+          
+          // Cache content extraction results
+          Caches.contentExtraction.set(contentCacheKey, content, 15 * 60 * 1000) // 15 minutes
+          
+          return content
+        },
+        50000, // Increased to 50 seconds to allow for retries
+        'Content extraction timed out'
+      )
+      console.log(`Content extraction completed: ${extractedContent.contentLength} characters`)
+    } catch (extractionError) {
+      console.error('Content extraction failed:', extractionError)
+      // Log detailed error for debugging
+      if (extractionError instanceof Error) {
+        console.error('Extraction error details:', {
+          message: extractionError.message,
+          stack: extractionError.stack
+        })
+      }
+      throw extractionError
+    }
 
     // Step 2: Analyze content with AI (with caching and improved retry logic)
     console.log('Starting AI analysis')

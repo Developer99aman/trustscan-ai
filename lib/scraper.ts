@@ -236,7 +236,14 @@ export class ContentExtractionService {
       if (method === 'primary') {
         try {
           console.log('🔍 Starting deep crawl for additional DeFi information...');
-          const deepCrawlData = await this.performDeepCrawl(page, url, $);
+          // Use timeout for deep crawl to prevent hanging
+          const deepCrawlTimeout = process.env.VERCEL === '1' ? 15000 : 20000;
+          const deepCrawlData = await Promise.race([
+            this.performDeepCrawl(page, url, $),
+            new Promise<any>((_, reject) => 
+              setTimeout(() => reject(new Error('Deep crawl timeout - skipping')), deepCrawlTimeout)
+            )
+          ]);
           content.deepCrawlData = deepCrawlData;
           
           // Enhance main content with deep crawl findings
@@ -273,12 +280,17 @@ export class ContentExtractionService {
             const gitHubRepoUrls = content.codeRepositories
               .filter(url => url.includes('github.com'));
             
-            // Verify all external sources
-            const externalVerification = await externalVerifier.verifyExternalSources(
-              linkedInUrls,
-              gitHubProfileUrls,
-              gitHubRepoUrls
-            );
+            // Verify all external sources with timeout
+            const externalVerification = await Promise.race([
+              externalVerifier.verifyExternalSources(
+                linkedInUrls,
+                gitHubProfileUrls,
+                gitHubRepoUrls
+              ),
+              new Promise<any>((_, reject) => 
+                setTimeout(() => reject(new Error('External verification timeout')), 10000)
+              )
+            ]);
             
             content.externalVerification = externalVerification;
             
@@ -288,7 +300,7 @@ export class ContentExtractionService {
             
             console.log(`✅ External verification complete: ${externalVerification.verifiedTeamMembers} team members verified, ${externalVerification.verifiedRepos} repos verified`);
           } catch (verificationError) {
-            console.warn('⚠️ External verification failed, continuing without it:', verificationError);
+            console.warn('⚠️ External verification failed, continuing without it:', verificationError instanceof Error ? verificationError.message : verificationError);
             // Don't fail if external verification fails
           }
           
@@ -297,8 +309,13 @@ export class ContentExtractionService {
             console.log('🌐 Starting social media crawl...');
             const socialMediaCrawler = new SocialMediaCrawler();
             
-            // Crawl all social media links
-            const socialMediaData = await socialMediaCrawler.crawlSocialMedia(content.socialLinks);
+            // Crawl all social media links with timeout
+            const socialMediaData = await Promise.race([
+              socialMediaCrawler.crawlSocialMedia(content.socialLinks),
+              new Promise<any>((_, reject) => 
+                setTimeout(() => reject(new Error('Social media crawl timeout')), 10000)
+              )
+            ]);
             content.socialMediaData = socialMediaData;
             
             // Add social media summary to content
@@ -307,7 +324,7 @@ export class ContentExtractionService {
             
             console.log(`✅ Social media crawl complete: ${socialMediaData.activeChannels} channels, ${socialMediaData.totalFollowers + socialMediaData.totalMembers} total community`);
           } catch (socialError) {
-            console.warn('⚠️ Social media crawl failed, continuing without it:', socialError);
+            console.warn('⚠️ Social media crawl failed, continuing without it:', socialError instanceof Error ? socialError.message : socialError);
             // Don't fail if social media crawl fails
           }
         } catch (deepCrawlError) {
@@ -318,8 +335,16 @@ export class ContentExtractionService {
       
       return content;
       
+    } catch (error) {
+      // If page extraction fails, try to recover with minimal content
+      console.warn(`Page extraction failed for ${url}, attempting recovery...`);
+      throw error;
     } finally {
-      await page.close();
+      try {
+        await page.close();
+      } catch (closeError) {
+        console.warn('Error closing page:', closeError);
+      }
     }
   }
 
@@ -347,90 +372,102 @@ export class ContentExtractionService {
       crawledPages: [] as string[]
     };
 
-    // FIRST: Check main page for team/security/governance info
-    console.log('🔍 Checking main page for team/security/governance info...');
-    const mainPageTeam = this.extractTeamInfo($);
-    if (mainPageTeam.members.length > 0) {
-      result.teamPageFound = true;
-      result.teamMembers.push(...mainPageTeam.members);
-      console.log(`  👥 Found ${mainPageTeam.members.length} team members on main page`);
-    }
-    
-    const mainPageSecurity = this.extractSecurityInfo($);
-    if (mainPageSecurity.hasBugBounty) {
-      result.bugBountyFound = true;
-      result.bugBountyDetails = mainPageSecurity.bugBountyDetails;
-      console.log(`  🔒 Found bug bounty info on main page`);
-    }
-    
-    const mainPageGov = this.extractGovernanceInfo($);
-    if (mainPageGov.hasGovernance) {
-      result.governanceFound = true;
-      result.governanceDetails = mainPageGov.details;
-      console.log(`  🗳️  Found governance info on main page`);
-    }
-
-    // Discover important links from main page
-    const importantLinks = this.discoverImportantLinks($, baseUrl);
-    console.log(`📋 Found ${importantLinks.length} important links to crawl`);
-
-    // Crawl each important page (limit to 10 to be more thorough)
-    const linksToCrawl = importantLinks.slice(0, 10);
-    
-    for (const link of linksToCrawl) {
-      try {
-        console.log(`  🔗 Crawling: ${link.url}`);
-        const response = await page.goto(link.url, { waitUntil: 'domcontentloaded', timeout: 10000 });
-        
-        // Check if page exists (not 404)
-        if (!response || response.status() === 404) {
-          console.log(`  ❌ Page not found (404): ${link.url}`);
-          continue;
-        }
-        
-        if (response.status() >= 400) {
-          console.log(`  ❌ HTTP ${response.status()}: ${link.url}`);
-          continue;
-        }
-        
-        await new Promise(resolve => setTimeout(resolve, 1000)); // Brief wait
-        
-        const pageHtml = await page.content();
-        const page$ = cheerio.load(pageHtml);
-        
-        result.crawledPages.push(link.url);
-        console.log(`  ✅ Successfully crawled: ${link.url}`);
-        
-        // Extract information based on page type
-        if (link.type === 'team') {
-          const teamData = this.extractTeamInfo(page$);
-          if (teamData.members.length > 0) {
-            result.teamPageFound = true;
-            result.teamMembers.push(...teamData.members);
-            console.log(`  👥 Found ${teamData.members.length} team members`);
-          }
-        } else if (link.type === 'security') {
-          const securityData = this.extractSecurityInfo(page$);
-          if (securityData.hasBugBounty) {
-            result.bugBountyFound = true;
-            result.bugBountyDetails = securityData.bugBountyDetails;
-            console.log(`  🔒 Found bug bounty program`);
-          }
-        } else if (link.type === 'governance') {
-          const govData = this.extractGovernanceInfo(page$);
-          if (govData.hasGovernance) {
-            result.governanceFound = true;
-            result.governanceDetails = govData.details;
-            console.log(`  🗳️  Found governance system`);
-          }
-        } else if (link.type === 'docs') {
-          result.documentationLinks.push(link.url);
-          console.log(`  📚 Found documentation page`);
-        }
-      } catch (error) {
-        console.warn(`  ⚠️ Failed to crawl ${link.url}:`, error instanceof Error ? error.message : error);
-        // Continue with other links
+    try {
+      // FIRST: Check main page for team/security/governance info
+      console.log('🔍 Checking main page for team/security/governance info...');
+      const mainPageTeam = this.extractTeamInfo($);
+      if (mainPageTeam.members.length > 0) {
+        result.teamPageFound = true;
+        result.teamMembers.push(...mainPageTeam.members);
+        console.log(`  👥 Found ${mainPageTeam.members.length} team members on main page`);
       }
+      
+      const mainPageSecurity = this.extractSecurityInfo($);
+      if (mainPageSecurity.hasBugBounty) {
+        result.bugBountyFound = true;
+        result.bugBountyDetails = mainPageSecurity.bugBountyDetails;
+        console.log(`  🔒 Found bug bounty info on main page`);
+      }
+      
+      const mainPageGov = this.extractGovernanceInfo($);
+      if (mainPageGov.hasGovernance) {
+        result.governanceFound = true;
+        result.governanceDetails = mainPageGov.details;
+        console.log(`  🗳️  Found governance info on main page`);
+      }
+
+      // Discover important links from main page
+      const importantLinks = this.discoverImportantLinks($, baseUrl);
+      console.log(`📋 Found ${importantLinks.length} important links to crawl`);
+
+      // Crawl each important page (limit to 10 to be more thorough)
+      const linksToCrawl = importantLinks.slice(0, 10);
+      
+      for (const link of linksToCrawl) {
+        try {
+          console.log(`  🔗 Crawling: ${link.url}`);
+          
+          // Use timeout to prevent hanging on unresponsive pages
+          const response = await Promise.race([
+            page.goto(link.url, { waitUntil: 'domcontentloaded', timeout: 10000 }),
+            new Promise<null>((_, reject) => 
+              setTimeout(() => reject(new Error('Deep crawl page timeout')), 12000)
+            )
+          ]);
+          
+          // Check if page exists (not 404)
+          if (!response || response.status() === 404) {
+            console.log(`  ❌ Page not found (404): ${link.url}`);
+            continue;
+          }
+          
+          if (response.status() >= 400) {
+            console.log(`  ❌ HTTP ${response.status()}: ${link.url}`);
+            continue;
+          }
+          
+          await new Promise(resolve => setTimeout(resolve, 500)); // Brief wait
+          
+          const pageHtml = await page.content();
+          const page$ = cheerio.load(pageHtml);
+          
+          result.crawledPages.push(link.url);
+          console.log(`  ✅ Successfully crawled: ${link.url}`);
+          
+          // Extract information based on page type
+          if (link.type === 'team') {
+            const teamData = this.extractTeamInfo(page$);
+            if (teamData.members.length > 0) {
+              result.teamPageFound = true;
+              result.teamMembers.push(...teamData.members);
+              console.log(`  👥 Found ${teamData.members.length} team members`);
+            }
+          } else if (link.type === 'security') {
+            const securityData = this.extractSecurityInfo(page$);
+            if (securityData.hasBugBounty) {
+              result.bugBountyFound = true;
+              result.bugBountyDetails = securityData.bugBountyDetails;
+              console.log(`  🔒 Found bug bounty program`);
+            }
+          } else if (link.type === 'governance') {
+            const govData = this.extractGovernanceInfo(page$);
+            if (govData.hasGovernance) {
+              result.governanceFound = true;
+              result.governanceDetails = govData.details;
+              console.log(`  🗳️  Found governance system`);
+            }
+          } else if (link.type === 'docs') {
+            result.documentationLinks.push(link.url);
+            console.log(`  📚 Found documentation page`);
+          }
+        } catch (error) {
+          console.warn(`  ⚠️ Failed to crawl ${link.url}:`, error instanceof Error ? error.message : error);
+          // Continue with other links - don't let one failure stop the crawl
+        }
+      }
+    } catch (error) {
+      console.warn('⚠️ Deep crawl encountered an error:', error instanceof Error ? error.message : error);
+      // Return partial results - don't fail completely
     }
 
     return result;
@@ -812,7 +849,10 @@ export class ContentExtractionService {
       '--disable-accelerated-2d-canvas',
       '--no-first-run',
       '--no-zygote',
-      '--disable-gpu'
+      '--disable-gpu',
+      '--disable-web-resources',
+      '--disable-default-apps',
+      '--disable-preconnect'
     ];
 
     if (method === 'fallback') {
@@ -820,25 +860,65 @@ export class ContentExtractionService {
       args.push(
         '--disable-blink-features=AutomationControlled',
         '--disable-features=VizDisplayCompositor',
-        '--disable-extensions'
+        '--disable-extensions',
+        '--disable-sync'
       );
     }
 
-    return await puppeteer.launch({
-      headless: true,
-      args,
-      timeout: 30000
-    });
+    try {
+      return await puppeteer.launch({
+        headless: 'new', // Use new headless mode for better compatibility
+        args,
+        timeout: 30000,
+        protocolTimeout: 180000 // Increase protocol timeout for slow connections
+      });
+    } catch (error) {
+      console.error('Failed to launch browser:', error);
+      throw new Error(`Browser launch failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   private async navigateToPage(page: Page, url: string, method: 'primary' | 'fallback'): Promise<void> {
     const waitUntil = method === 'primary' ? 'networkidle0' : 'domcontentloaded';
     const timeout = method === 'primary' ? this.config.timeout : 15000;
 
-    await page.goto(url, { 
-      waitUntil, 
-      timeout 
-    });
+    try {
+      const response = await page.goto(url, { 
+        waitUntil, 
+        timeout,
+        referer: 'https://www.google.com/' // Add referer to appear more legitimate
+      });
+
+      if (!response) {
+        throw new Error('No response from page.goto');
+      }
+
+      // Check for error status codes
+      if (response.status() >= 400) {
+        if (response.status() === 403) {
+          throw ExtractionErrorHandler.createError(
+            ExtractionErrorType.ACCESS_DENIED,
+            `HTTP 403: Access forbidden`,
+            undefined,
+            url
+          );
+        } else if (response.status() === 429) {
+          throw ExtractionErrorHandler.createError(
+            ExtractionErrorType.RATE_LIMITED,
+            `HTTP 429: Too many requests`,
+            undefined,
+            url
+          );
+        } else {
+          throw new Error(`HTTP ${response.status()}: ${response.statusText}`);
+        }
+      }
+    } catch (error) {
+      if (error && typeof error === 'object' && 'type' in error) {
+        throw error; // Re-throw ExtractionError
+      }
+      throw ExtractionErrorHandler.classifyError(error as Error, url);
+    }
   }
 
   private async handleAntiBot(page: Page): Promise<void> {
