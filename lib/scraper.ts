@@ -249,7 +249,7 @@ export class ContentExtractionService {
           // Enhance main content with deep crawl findings
           if (deepCrawlData.teamMembers.length > 0) {
             const teamText = deepCrawlData.teamMembers
-              .map(m => `${m.name}${m.role ? ` (${m.role})` : ''}${m.linkedin ? ` - LinkedIn: ${m.linkedin}` : ''}`)
+              .map((m: { name: string; role?: string; linkedin?: string }) => `${m.name}${m.role ? ` (${m.role})` : ''}${m.linkedin ? ` - LinkedIn: ${m.linkedin}` : ''}`)
               .join('; ');
             content.teamInfo += `\n\nTeam Members Found: ${teamText}`;
           }
